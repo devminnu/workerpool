@@ -35,7 +35,8 @@ type JobResponse[R Data] struct {
 	Error    error
 }
 
-type JobFunc[T Data, R Data] func(JobRequest[T]) JobResponse[R]
+type JobFunc[T Data, R Data] func(T) R
+type JobFuncWithContext[T Data, R Data] func(context.Context, T) R
 
 type WorkerPool[T Data, R Data] interface {
 	NumberOfWorkers() int32
@@ -44,21 +45,23 @@ type WorkerPool[T Data, R Data] interface {
 	SetNumberOfWorkers(int32)
 	WorkerScheduler(context.Context)
 	SetJobFunc(JobFunc[T, R]) WorkerPool[T, R]
-	AddJobs(...JobRequest[T]) WorkerPool[T, R]
+	SetJobFuncWithContext(JobFuncWithContext[T, R]) WorkerPool[T, R]
+	AddJobs(...T) WorkerPool[T, R]
 	RunInBackground()
 	RunInOrder() WorkerPool[T, R]
-	ForEach(f func(JobResponse[R]))
+	ForEach(f func(R))
 }
 
 type workerPool[T Data, R Data] struct {
 	wg                 *sync.WaitGroup
 	numberOfWorkers    int32
-	jobRequests        []JobRequest[T]
+	jobRequests        []T
 	jobFunc            JobFunc[T, R]
+	JobFuncWithContext JobFuncWithContext[T, R]
 	jobQueue           chan JobRequest[T]
 	backgroundJobQueue chan JobRequest[T]
 	inOrderJobQueue    chan InOrderJobRequest[T]
-	jobResponseChan    chan JobResponse[R]
+	jobResponseChan    chan R
 	addWorkerChan      chan struct{}
 	removeWorkerChan   chan struct{}
 	cond               *sync.Cond
@@ -149,8 +152,15 @@ func (wp *workerPool[T, R]) SetJobFunc(
 	return wp
 }
 
+func (wp *workerPool[T, R]) SetJobFuncWithContext(
+	jobFuncWithContext JobFuncWithContext[T, R]) WorkerPool[T, R] {
+	wp.JobFuncWithContext = jobFuncWithContext
+
+	return wp
+}
+
 func (wp *workerPool[T, R]) AddJobs(
-	jobRequests ...JobRequest[T]) WorkerPool[T, R] {
+	jobRequests ...T) WorkerPool[T, R] {
 	wp.jobRequests = append(wp.jobRequests, jobRequests...)
 
 	return wp
@@ -160,18 +170,18 @@ func (wp *workerPool[T, R]) RunInBackground() {
 	go func() {
 		for _, jobRequest := range wp.jobRequests {
 			wp.wg.Add(1)
-			wp.backgroundJobQueue <- jobRequest
+			wp.backgroundJobQueue <- JobRequest[T]{Request: jobRequest}
 		}
 		wp.wg.Wait()
 	}()
 }
 
 func (wp *workerPool[T, R]) RunInOrder() WorkerPool[T, R] {
-	wp.jobResponseChan = make(chan JobResponse[R], len(wp.jobQueue))
+	wp.jobResponseChan = make(chan R, len(wp.jobQueue))
 	go func() {
 		for index, jobRequest := range wp.jobRequests {
 			wp.wg.Add(1)
-			wp.inOrderJobQueue <- InOrderJobRequest[T]{JobRequest: jobRequest, Index: int32(index)}
+			wp.inOrderJobQueue <- InOrderJobRequest[T]{JobRequest: JobRequest[T]{Request: jobRequest}, Index: int32(index)}
 		}
 		wp.wg.Wait()
 		close(wp.jobResponseChan)
@@ -180,7 +190,7 @@ func (wp *workerPool[T, R]) RunInOrder() WorkerPool[T, R] {
 	return wp
 }
 
-func (wp *workerPool[T, R]) ForEach(f func(JobResponse[R])) {
+func (wp *workerPool[T, R]) ForEach(f func(R)) {
 	for v := range wp.jobResponseChan {
 		f(v)
 	}
@@ -197,7 +207,7 @@ func (wp *workerPool[T, R]) worker(workerCtx context.Context) {
 						log.Println(err)
 					}
 				}()
-				wp.jobFunc(bgJobRequest)
+				wp.jobFunc(bgJobRequest.Request)
 			}()
 		case jobRequest := <-wp.jobQueue:
 			func() {
@@ -207,7 +217,7 @@ func (wp *workerPool[T, R]) worker(workerCtx context.Context) {
 						log.Println(err)
 					}
 				}()
-				jobResponse := wp.jobFunc(jobRequest)
+				jobResponse := wp.jobFunc(jobRequest.Request)
 				wp.jobResponseChan <- jobResponse
 			}()
 		case inOrderJobRequest := <-wp.inOrderJobQueue:
@@ -218,7 +228,7 @@ func (wp *workerPool[T, R]) worker(workerCtx context.Context) {
 						log.Println(err)
 					}
 				}()
-				jobResponse := wp.jobFunc(inOrderJobRequest.JobRequest)
+				jobResponse := wp.jobFunc(inOrderJobRequest.JobRequest.Request)
 				wp.cond.L.Lock()
 				for wp.counter != inOrderJobRequest.Index {
 					wp.cond.Wait()
