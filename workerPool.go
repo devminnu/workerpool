@@ -159,12 +159,10 @@ func (wp *workerPool[T, R]) AddJobs(
 func (wp *workerPool[T, R]) RunInBackground() {
 	go func() {
 		for _, jobRequest := range wp.jobRequests {
-			fmt.Println("scheduling job:", jobRequest)
 			wp.wg.Add(1)
 			wp.backgroundJobQueue <- jobRequest
 		}
 		wp.wg.Wait()
-		fmt.Println("Background Jobs Done!!!")
 	}()
 }
 
@@ -172,12 +170,10 @@ func (wp *workerPool[T, R]) RunInOrder() WorkerPool[T, R] {
 	wp.jobResponseChan = make(chan JobResponse[R], len(wp.jobQueue))
 	go func() {
 		for index, jobRequest := range wp.jobRequests {
-			fmt.Println("scheduling job:", jobRequest)
 			wp.wg.Add(1)
 			wp.inOrderJobQueue <- InOrderJobRequest[T]{JobRequest: jobRequest, Index: int32(index)}
 		}
 		wp.wg.Wait()
-		fmt.Println("InOrder Jobs Done!!!")
 		close(wp.jobResponseChan)
 	}()
 
@@ -191,8 +187,6 @@ func (wp *workerPool[T, R]) ForEach(f func(JobResponse[R])) {
 }
 
 func (wp *workerPool[T, R]) worker(workerCtx context.Context) {
-	defer fmt.Println("exiting worker")
-	fmt.Println("launched worker")
 	for {
 		select {
 		case bgJobRequest := <-wp.backgroundJobQueue:
@@ -213,10 +207,8 @@ func (wp *workerPool[T, R]) worker(workerCtx context.Context) {
 						log.Println(err)
 					}
 				}()
-				fmt.Println("Doing Job::", jobRequest)
 				jobResponse := wp.jobFunc(jobRequest)
 				wp.jobResponseChan <- jobResponse
-				fmt.Println("req:", jobRequest, " res:", jobResponse)
 			}()
 		case inOrderJobRequest := <-wp.inOrderJobQueue:
 			func() {
